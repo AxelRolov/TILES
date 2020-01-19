@@ -60,7 +60,7 @@ class TILES(object):
         self.obs = obs
         self.communities = {}
 
-    def execute(self):
+    def execute(self, gftype='tsv', df=None):
         """
             Execute TILES algorithm
         """
@@ -68,118 +68,229 @@ class TILES(object):
         self.status.flush()
 
         qr = PriorityQueue()
+        if gftype=='tsv':
+            with open(self.filename, 'r') as f:
+                first_line = f.readline()
+                actual_time = datetime.datetime.fromtimestamp(float(first_line.split("\t")[2]))
+                f.close()
+                last_break = actual_time
 
-        with open(self.filename, 'r') as f:
-            first_line = f.readline()
+                count = 0
 
-        actual_time = datetime.datetime.fromtimestamp(float(first_line.split("\t")[2]))
-        last_break = actual_time
-        f.close()
+                #################################################
+                #                   Main Cycle                  #
+                #################################################
 
-        count = 0
+                f = open(self.filename)
+                for l in f:
+                    l = l.split("\t")
+                    self.added += 1
+                    e = {}
+                    u = int(l[0])
+                    v = int(l[1])
+                    dt = datetime.datetime.fromtimestamp(float(l[2]))
 
-        #################################################
-        #                   Main Cycle                  #
-        #################################################
+                    e['weight'] = 1
+                    e["u"] = l[0]
+                    e["v"] = l[1]
+                    # month = dt.month
 
-        f = open(self.filename)
-        for l in f:
-            l = l.split("\t")
-            self.added += 1
-            e = {}
-            u = int(l[0])
-            v = int(l[1])
-            dt = datetime.datetime.fromtimestamp(float(l[2]))
+                    #############################################
+                    #               Observations                #
+                    #############################################
 
-            e['weight'] = 1
-            e["u"] = l[0]
-            e["v"] = l[1]
-            # month = dt.month
+                    gap = dt - last_break
+                    dif = gap.days
 
-            #############################################
-            #               Observations                #
-            #############################################
+                    if dif >= self.obs:
+                        last_break = dt
+                        self.added -= 1
 
-            gap = dt - last_break
-            dif = gap.days
+                        print("New slice. Starting Day: %s" % dt)
 
-            if dif >= self.obs:
-                last_break = dt
-                self.added -= 1
+                        self.status.write(u"Saving Slice %s: Starting %s ending %s - (%s)\n" %
+                                          (self.actual_slice, actual_time, dt,
+                                           str(time.asctime(time.localtime(time.time())))))
 
-                print("New slice. Starting Day: %s" % dt)
+                        self.status.write(u"Edge Added: %d\tEdge removed: %d\n" % (self.added, self.removed))
+                        self.added = 1
+                        self.removed = 0
 
-                self.status.write(u"Saving Slice %s: Starting %s ending %s - (%s)\n" %
-                                  (self.actual_slice, actual_time, dt,
+                        actual_time = dt
+                        self.status.flush()
+
+                        self.splits = gzip.open("%s/%s/splitting-%d.gz" % (self.base, self.path, self.actual_slice),
+                                                "wt", 3)
+                        self.splits.write(self.spl.getvalue())
+                        self.splits.flush()
+                        self.splits.close()
+                        self.spl = StringIO()
+
+                        self.print_communities()
+                        self.status.write(
+                            u"\nStarted Slice %s (%s)\n" % (self.actual_slice, str(datetime.datetime.now().time())))
+
+                    if u == v:
+                        continue
+
+                    # Check if edge removal is required
+                    if self.ttl != float('inf'):
+                        qr.put((dt, (int(e['u']), int(e['v']), int(e['weight']))))
+                        self.remove(dt, qr)
+
+                    if not self.g.has_node(u):
+                        self.g.add_node(u)
+                        self.g.node[u]['c_coms'] = {}  # central
+
+                    if not self.g.has_node(v):
+                        self.g.add_node(v)
+                        self.g.node[v]['c_coms'] = {}
+
+                    if self.g.has_edge(u, v):
+                        w = self.g.adj[u][v]["weight"]
+                        self.g.adj[u][v]["weight"] = w + e['weight']
+                        continue
+                    else:
+                        self.g.add_edge(u, v)
+                        self.g.adj[u][v]["weight"] = e['weight']
+
+                    u_n = list(self.g.neighbors(u))
+                    v_n = list(self.g.neighbors(v))
+
+                    #############################################
+                    #               Evolution                   #
+                    #############################################
+
+                    # new community of peripheral nodes (new nodes)
+                    if len(u_n) > 1 and len(v_n) > 1:
+                        common_neighbors = set(u_n) & set(v_n)
+                        self.common_neighbors_analysis(u, v, common_neighbors)
+
+                    count += 1
+
+                #  Last writing
+                self.status.write(u"Slice %s: Starting %s ending %s - (%s)\n" %
+                                  (self.actual_slice, actual_time, actual_time,
                                    str(time.asctime(time.localtime(time.time())))))
-
                 self.status.write(u"Edge Added: %d\tEdge removed: %d\n" % (self.added, self.removed))
-                self.added = 1
+                self.added = 0
                 self.removed = 0
 
-                actual_time = dt
+                self.print_communities()
+                self.status.write(u"Finished! (%s)" % str(time.asctime(time.localtime(time.time()))))
                 self.status.flush()
+                self.status.close()
+        elif gftype=='df':
+            if df is not None:
+                actual_time = datetime.datetime.fromtimestamp(df.iloc[0, 2])
+                last_break = actual_time
 
-                self.splits = gzip.open("%s/%s/splitting-%d.gz" % (self.base, self.path, self.actual_slice), "wt", 3)
-                self.splits.write(self.spl.getvalue())
-                self.splits.flush()
-                self.splits.close()
-                self.spl = StringIO()
+                count = 0
+
+                #################################################
+                #                   Main Cycle                  #
+                #################################################
+                for l in df.itertuples():
+                    self.added += 1
+                    e = {}
+                    u = int(l[0])
+                    v = int(l[1])
+                    dt = datetime.datetime.fromtimestamp(float(l[2]))
+
+                    e['weight'] = 1
+                    e["u"] = l[0]
+                    e["v"] = l[1]
+                    # month = dt.month
+
+                    #############################################
+                    #               Observations                #
+                    #############################################
+
+                    gap = dt - last_break
+                    dif = gap.days
+
+                    if dif >= self.obs:
+                        last_break = dt
+                        self.added -= 1
+
+                        print("New slice. Starting Day: %s" % dt)
+
+                        self.status.write(u"Saving Slice %s: Starting %s ending %s - (%s)\n" %
+                                          (self.actual_slice, actual_time, dt,
+                                           str(time.asctime(time.localtime(time.time())))))
+
+                        self.status.write(u"Edge Added: %d\tEdge removed: %d\n" % (self.added, self.removed))
+                        self.added = 1
+                        self.removed = 0
+
+                        actual_time = dt
+                        self.status.flush()
+
+                        self.splits = gzip.open("%s/%s/splitting-%d.gz" % (self.base, self.path, self.actual_slice),
+                                                "wt", 3)
+                        self.splits.write(self.spl.getvalue())
+                        self.splits.flush()
+                        self.splits.close()
+                        self.spl = StringIO()
+
+                        self.print_communities()
+                        self.status.write(
+                            u"\nStarted Slice %s (%s)\n" % (self.actual_slice, str(datetime.datetime.now().time())))
+
+                    if u == v:
+                        continue
+
+                    # Check if edge removal is required
+                    if self.ttl != float('inf'):
+                        qr.put((dt, (int(e['u']), int(e['v']), int(e['weight']))))
+                        self.remove(dt, qr)
+
+                    if not self.g.has_node(u):
+                        self.g.add_node(u)
+                        self.g.node[u]['c_coms'] = {}  # central
+
+                    if not self.g.has_node(v):
+                        self.g.add_node(v)
+                        self.g.node[v]['c_coms'] = {}
+
+                    if self.g.has_edge(u, v):
+                        w = self.g.adj[u][v]["weight"]
+                        self.g.adj[u][v]["weight"] = w + e['weight']
+                        continue
+                    else:
+                        self.g.add_edge(u, v)
+                        self.g.adj[u][v]["weight"] = e['weight']
+
+                    u_n = list(self.g.neighbors(u))
+                    v_n = list(self.g.neighbors(v))
+
+                    #############################################
+                    #               Evolution                   #
+                    #############################################
+
+                    # new community of peripheral nodes (new nodes)
+                    if len(u_n) > 1 and len(v_n) > 1:
+                        common_neighbors = set(u_n) & set(v_n)
+                        self.common_neighbors_analysis(u, v, common_neighbors)
+
+                    count += 1
+
+                #  Last writing
+                self.status.write(u"Slice %s: Starting %s ending %s - (%s)\n" %
+                                  (self.actual_slice, actual_time, actual_time,
+                                   str(time.asctime(time.localtime(time.time())))))
+                self.status.write(u"Edge Added: %d\tEdge removed: %d\n" % (self.added, self.removed))
+                self.added = 0
+                self.removed = 0
 
                 self.print_communities()
-                self.status.write(
-                    u"\nStarted Slice %s (%s)\n" % (self.actual_slice, str(datetime.datetime.now().time())))
-
-            if u == v:
-                continue
-
-            # Check if edge removal is required
-            if self.ttl != float('inf'):
-                qr.put((dt, (int(e['u']), int(e['v']), int(e['weight']))))
-                self.remove(dt, qr)
-
-            if not self.g.has_node(u):
-                self.g.add_node(u)
-                self.g.node[u]['c_coms'] = {}  # central
-
-            if not self.g.has_node(v):
-                self.g.add_node(v)
-                self.g.node[v]['c_coms'] = {}
-
-            if self.g.has_edge(u, v):
-                w = self.g.adj[u][v]["weight"]
-                self.g.adj[u][v]["weight"] = w + e['weight']
-                continue
+                self.status.write(u"Finished! (%s)" % str(time.asctime(time.localtime(time.time()))))
+                self.status.flush()
+                self.status.close()
             else:
-                self.g.add_edge(u, v)
-                self.g.adj[u][v]["weight"] = e['weight']
+                'No dataframe file provided'
 
-            u_n = list(self.g.neighbors(u))
-            v_n = list(self.g.neighbors(v))
 
-            #############################################
-            #               Evolution                   #
-            #############################################
-
-            # new community of peripheral nodes (new nodes)
-            if len(u_n) > 1 and len(v_n) > 1:
-                common_neighbors = set(u_n) & set(v_n)
-                self.common_neighbors_analysis(u, v, common_neighbors)
-
-            count += 1
-
-        #  Last writing
-        self.status.write(u"Slice %s: Starting %s ending %s - (%s)\n" %
-                          (self.actual_slice, actual_time, actual_time,
-                           str(time.asctime(time.localtime(time.time())))))
-        self.status.write(u"Edge Added: %d\tEdge removed: %d\n" % (self.added, self.removed))
-        self.added = 0
-        self.removed = 0
-
-        self.print_communities()
-        self.status.write(u"Finished! (%s)" % str(time.asctime(time.localtime(time.time()))))
-        self.status.flush()
-        self.status.close()
 
     @property
     def new_community_id(self):
